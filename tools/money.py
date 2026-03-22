@@ -68,7 +68,7 @@ def generate_expense_report():
             for row in data
         ]
 
-        plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'PingFang HK', 'SemHei']
+        plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'Microsoft JhengHei', 'PingFang HK', 'SemHei']
         plt.rcParams['axes.unicode_minus'] = False
 
         plt.figure(figsize=(6, 6))
