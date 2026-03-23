@@ -35,7 +35,7 @@ def query_schedule(start_date, end_date):
             orderBy='startTime'
         ).execute()
         events = events_result.get('items', [])
-        print(events)
+        
         if not events:
             return f'{start_date}到{end_date}目前沒有任何行程。'
         
