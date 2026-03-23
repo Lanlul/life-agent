@@ -14,37 +14,45 @@ def get_calendar_service():
     return build('calendar', 'v3', credentials=creds)
 
 @tool
-def get_today_schedule(date_str):
+def query_schedule(start_date, end_date):
     """
-    查詢特定日期的行程。
-    date_str必須是'YYYY-MM-DD'格式，例如'2026-03-23'。
+    查詢一段日期範圍內的行事曆行程。
+    start_date與end_date必須是'YYYY-MM-DD'格式(例如 '2026-03-23')。
+    若只要查詢單日(例如今天)，請將start_date與end_date設為同一天。
     """
     try:
         service = get_calendar_service()
         calendar_id = os.getenv('GOOGLE_CALENDAR_ID')
 
-        time_min = f'{date_str}T00:00:00+08:00'
-        time_max = f'{date_str}T23:59:59+08:00'
+        time_min = f'{start_date}T00:00:00+08:00'
+        time_max = f'{end_date}T23:59:59+08:00'
 
         events_result = service.events().list(
-            calendarTd=calendar_id,
+            calendarId=calendar_id,
             timeMin=time_min,
             timeMax=time_max,
             singleEvents=True,
             orderBy='startTime'
         ).execute()
         events = events_result.get('items', [])
-
+        print(events)
         if not events:
-            return f'{date_str}目前沒有任何行程。'
+            return f'{start_date}到{end_date}目前沒有任何行程。'
         
-        schedule_list = [f'{date_str}的行程清單：']
+        schedule_list = [f'{start_date}到{end_date}的行程清單：']
         for event in events:
             start = event['start'].get('dateTime', event['start'].get('date'))
-            time_only = start.split('T')[1][:5] if 'T' in start else '全天'
-            schedule_list.append(f'- {time_only} : {event['summary']}')
+            
+            if 'T' in start:
+                date_part = start.split('T')[0][5:]
+                time_part = start.split('T')[1][:5]
+                schedule_list.append(f'- [{date_part} {time_part}] : {event['summary']}')
+            else:
+                date_part = start[5:]
+                schedule_list.append(f'- [{date_part} 全天] : {event['summary']}')
 
-            return '\n'.join(schedule_list)
+        return '\n'.join(schedule_list)
+        
     except Exception as e:
         return f'讀取行事曆失敗，錯誤訊息：{str(e)}'
 
@@ -54,7 +62,7 @@ def add_schedule(title, start_time, end_time, force=False):
     """
     新增行程到Google行事曆。
     start_time和end_time必須是標準的ISO 8601格式字串(包含時區)，例如：'2026-03-22T15:00:00+08:00'。
-    若 force為False，遇到時間衝突時會回報錯誤；若force為True，則無視衝突強制寫入。
+    若force為False，遇到時間衝突時會回報錯誤；若force為True，則無視衝突強制寫入。
     """
     try:
         service = get_calendar_service()
@@ -65,7 +73,7 @@ def add_schedule(title, start_time, end_time, force=False):
                 calendarId=calendar_id,
                 timeMin=start_time,
                 timeMax=end_time,
-                singleE=True
+                singleEvents=True
             ).execute()
             events = events_result.get('items', [])
 
