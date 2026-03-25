@@ -10,7 +10,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import SystemMessage
-
+from langchain_core.messages import RemoveMessage
 from tools import tools
 
 #載入金鑰
@@ -24,6 +24,44 @@ class State(TypedDict):
 #初始化LLM並綁定工具
 llm = ChatOpenAI(model='gpt-3.5-turbo', base_url = os.getenv('BASE_URL'), temperature=0)
 llm_with_tools = llm.bind_tools(tools)
+
+# async def filter_history_node(state: State):
+#     messages = state["messages"]
+
+#     if len(messages) < 3:
+#         return {"messages": []}
+
+#     delete_ids = []
+
+#     for i, msg in enumerate(messages[:-1]):
+#         if msg.type == "tool" and "[DISPOSABLE]" in str(msg.content):
+#             delete_ids.append(msg.id)
+            
+#             if i > 0 and messages[i-1].type == "ai":
+#                 if hasattr(messages[i-1], 'tool_calls'):
+#                     delete_ids.append(messages[i-1].id)
+
+#     return {"messages": [RemoveMessage(id=id) for id in delete_ids]}
+
+async def filter_history_node(state: State):
+    messages = state["messages"]
+    if len(messages) < 2:
+        return {"messages": []}
+
+    delete_ids = []
+    
+    for i, msg in enumerate(messages):
+        if msg.type == "tool" and "[DISPOSABLE]" in str(msg.content):
+            delete_ids.append(msg.id)
+            
+            if i > 0 and messages[i-1].type == "ai":
+                delete_ids.append(messages[i-1].id)
+            
+            if i < len(messages) - 1 and messages[i+1].type == "ai":
+                if i+1 < len(messages) - 1: 
+                    delete_ids.append(messages[i+1].id)
+
+    return {"messages": [RemoveMessage(id=m_id) for m_id in delete_ids]}
 
 #定義Agent思考節點
 async def chatbot_node(state):
@@ -67,6 +105,14 @@ async def chatbot_node(state):
     【規則 4：行程報告與不摘要原則】
     - 當你呼叫 query_schedule 查詢行程後，請務必「一字不漏、完整列出」工具回傳的所有行程細節。
     - 🚨 絕對禁止擅自省略、總結或摘要行程！使用者需要看到最完整的時間與事件清單。
+    
+    【規則 5：學術研究助理 (RAG 版)】
+    - 📚 搜尋論文：當使用者想找論文時，呼叫 search_and_download_papers (請將中文關鍵字翻譯為精準的英文學術詞彙)。取得資料後，請列出標題、線上連結與伺服器檔案路徑。
+    - 📖 論文摘要與問答：
+      👉 無論使用者是要求「摘要整篇」還是「詢問特定細節」，🚨統一呼叫 paper_assistant_rag。
+      👉 若要求摘要，請將 user_goal 設為「請摘要這篇論文的研究動機、核心貢獻、實驗方法與數據集、實驗結果與結論」。
+      👉 若詢問細節，請將 user_goal 設為使用者的具體問題。
+      👉 回覆時請保持專業，使用繁體中文，且排版清晰易讀。
     """
 
     messages_to_llm = [SystemMessage(content=system_prompt)] + state["messages"]
@@ -77,10 +123,19 @@ async def chatbot_node(state):
 builder = StateGraph(State)
 builder.add_node('agent', chatbot_node)
 builder.add_node('tools', ToolNode(tools=tools))
+builder.add_node('filter', filter_history_node)
 
 #設定邏輯流向
-builder.add_edge(START, 'agent')
-builder.add_conditional_edges('agent', tools_condition)
+builder.add_edge(START, 'filter')
+builder.add_edge('filter', 'agent')
+builder.add_conditional_edges(
+    'agent', 
+    tools_condition, 
+    {
+        "tools": "tools", 
+        END: END 
+    }
+)
 builder.add_edge('tools', 'agent')
 
 memory = MemorySaver()
