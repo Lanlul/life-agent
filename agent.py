@@ -22,26 +22,8 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]
 
 #初始化LLM並綁定工具
-llm = ChatOpenAI(model='gpt-3.5-turbo', base_url = os.getenv('BASE_URL'), temperature=0)
+llm = ChatOpenAI(model='gpt-4o-mini', base_url = os.getenv('BASE_URL'), temperature=0)
 llm_with_tools = llm.bind_tools(tools)
-
-# async def filter_history_node(state: State):
-#     messages = state["messages"]
-
-#     if len(messages) < 3:
-#         return {"messages": []}
-
-#     delete_ids = []
-
-#     for i, msg in enumerate(messages[:-1]):
-#         if msg.type == "tool" and "[DISPOSABLE]" in str(msg.content):
-#             delete_ids.append(msg.id)
-            
-#             if i > 0 and messages[i-1].type == "ai":
-#                 if hasattr(messages[i-1], 'tool_calls'):
-#                     delete_ids.append(messages[i-1].id)
-
-#     return {"messages": [RemoveMessage(id=id) for id in delete_ids]}
 
 async def filter_history_node(state: State):
     messages = state["messages"]
@@ -50,18 +32,66 @@ async def filter_history_node(state: State):
 
     delete_ids = []
     
-    for i, msg in enumerate(messages):
-        if msg.type == "tool" and "[DISPOSABLE]" in str(msg.content):
-            delete_ids.append(msg.id)
-            
-            if i > 0 and messages[i-1].type == "ai":
-                delete_ids.append(messages[i-1].id)
-            
-            if i < len(messages) - 1 and messages[i+1].type == "ai":
-                if i+1 < len(messages) - 1: 
-                    delete_ids.append(messages[i+1].id)
+    # 👑 核心錨點：找出「最新一次 User 提問」的索引位置
+    # 這能幫我們精準判斷哪些工具是「上一輪」的，哪些是「本輪」的
+    last_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].type == "human":
+            last_user_idx = i
+            break
 
-    return {"messages": [RemoveMessage(id=m_id) for m_id in delete_ids]}
+    # 分類收集兩種工具的索引位置
+    search_tool_indices = []
+    rag_tool_indices = []
+
+    for i, msg in enumerate(messages):
+        if msg.type == "tool":
+            # 透過工具名稱精準辨識 (也可以保留你原本判斷 [DISPOSABLE] 的寫法)
+            if getattr(msg, "name", "") == "search_and_download_papers":
+                search_tool_indices.append(i)
+            elif getattr(msg, "name", "") == "paper_assistant_rag" or "[DISPOSABLE]" in str(msg.content):
+                rag_tool_indices.append(i)
+
+    # =========================================================
+    # 🚀 策略一：search_and_download_papers (用到下一次才覆蓋)
+    # =========================================================
+    # 如果歷史紀錄中有 2 次以上的找論文紀錄，我們只保留「最後一次 (最新的)」
+    if len(search_tool_indices) > 0:
+        # search_tool_indices[:-1] 代表「除了最後一個以外的所有舊紀錄」
+        for idx in search_tool_indices[:-1]:
+            delete_ids.append(messages[idx].id) # 刪除舊的 ToolMessage
+            
+            # 對稱刪除：呼叫舊搜尋的 AI 指令
+            if idx > 0 and messages[idx-1].type == "ai":
+                delete_ids.append(messages[idx-1].id)
+                
+            # 對稱刪除：AI 針對舊搜尋所做的回覆清單
+            if idx < len(messages) - 1 and messages[idx+1].type == "ai":
+                delete_ids.append(messages[idx+1].id)
+
+    # =========================================================
+    # 🔥 策略二：paper_assistant_rag (下一個 prompt 輸入時馬上刪除)
+    # =========================================================
+    for idx in rag_tool_indices:
+        # 判斷關鍵：如果這個 RAG 紀錄的位置 < 最新 User 提問的位置
+        # 代表它是「上一輪」的產物，必須馬上被燒毀！
+        if idx < last_user_idx:
+            delete_ids.append(messages[idx].id) # 刪除舊的 RAG 結果
+            
+            # 對稱刪除：呼叫舊 RAG 的 AI 指令
+            if idx > 0 and messages[idx-1].type == "ai":
+                delete_ids.append(messages[idx-1].id)
+            
+            # 對稱刪除：AI 針對舊 RAG 所做的摘要回覆
+            if idx < len(messages) - 1 and messages[idx+1].type == "ai":
+                # 確保這個回覆也是在新的 User 提問之前
+                if (idx + 1) < last_user_idx:
+                    delete_ids.append(messages[idx+1].id)
+
+    # 去除重複的 ID，避免 LangGraph 報錯
+    unique_delete_ids = list(set(delete_ids))
+
+    return {"messages": [RemoveMessage(id=m_id) for m_id in unique_delete_ids]}
 
 #定義Agent思考節點
 async def chatbot_node(state):
@@ -136,7 +166,10 @@ builder.add_conditional_edges(
         END: END 
     }
 )
-builder.add_edge('tools', 'agent')
+builder.add_edge('tools', 'filter')
+builder.add_edge('filter', 'agent')
 
 memory = MemorySaver()
 agent_app = builder.compile(checkpointer=memory)
+
+# TODO 把找論文過濾加入filter，並在最後加入filter節點
