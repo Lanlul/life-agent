@@ -1,12 +1,14 @@
 import os
-import time
-import arxiv
-import random
+import requests
+from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI
+
+load_dotenv()
 
 if not os.path.exists('papers'):
     os.makedirs('papers')
@@ -14,67 +16,44 @@ if not os.path.exists('papers'):
 @tool
 def search_and_download_papers(query, max_results=5):
     """
-    當使用者需要尋找、查詢或下載「學術論文」時呼叫此工具。
-    query 必須是【英文】的學術關鍵字（例如："3D tooth semantic instance segmentation"）。
-    此工具會自動去 ArXiv 資料庫搜尋最新且相關的論文，下載 PDF 到伺服器，並回傳論文資訊、連結與檔案路徑。
+    使用者需要尋找、查詢或下載「學術論文」時呼叫此工具。
+    query 必須是英文學術關鍵字。工具會下載 PDF 並回傳包含 [SEARCH_RESULT] 標籤的清單。
     """
-    try:
-        client = arxiv.Client()
-        search = arxiv.Search(
-            query=query,
-            max_results=max_results,
-            sort_by=arxiv.SortCriterion.Relevance
-        )
-        results_text = [f'找到關於「{query}」的Top{max_results}論文，已全數下載至伺服器：\n']
+    url = 'https://api.openalex.org/works'
+    data = {
+        'search': query,
+        'filter': 'is_oa:true,primary_location.source.id:https://openalex.org/S4306400194,has_pdf_url:true',
+        'sort': 'relevance_score:desc',
+        'per-page': max_results
+    }
+    response = requests.get(url, data)
+    results = response.json()
+    results = results['results']
+    results_text = [f'[SEARCH_RESULT] 關於「{query}」的搜尋清單：']
+    for i, result in enumerate(results):
+        title = result['title']
+        pdf_url = result['best_oa_location']['pdf_url']
+        
+        
+        safe_title = ''.join([c for c in title if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+        filename = f'./papers/{safe_title[:40]}.pdf'
 
-        for i, result in enumerate(client.results(search), 1):
-            title = result.title
-            published_date = result.published.strftime("%Y-%m-%d")
-            pdf_url = result.pdf_url
+        response = requests.get(pdf_url)
+        with open(filename, 'wb') as file:
+            file.write(response.content)
 
-            safe_title = ''.join([c for c in title if c.isalpha() or c.isdigit() or c==' ']).rstrip()
-            filename = f'./papers/[{published_date}] {safe_title[:40]}.pdf'
+        results_text.append(f'**[{i}] {title}**')
+        results_text.append(f'🔗線上觀看:{pdf_url}')
+        results_text.append(f'📂伺服器檔案路徑: `{filename}`\n')
 
-            result.download_pdf(filename=filename)
+    return '\n'.join(results_text) + '\n\n請將以上論文標題翻譯成繁體中文，並回傳標題、線上連結給使用者。'
 
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    print(f'[{i}/{max_results}]準備下載：{safe_title[:20]}...')
-                    result.download_pdf(filename=filename)
-
-                    sleep_time = random.uniform(8, 15)
-                    print(f'✅ 下載成功！隨機冷卻 {sleep_time:.1f} 秒防封鎖 ⏳')
-                    time.sleep(sleep_time)
-                    break
-
-                except Exception as e:
-                    if '429' in str(e):
-                        wait_time = (2 ** attempt) * 15
-                        print(f'⚠️ 觸發 429 限制！退避等待 {wait_time} 秒後重試...')
-                        time.sleep(wait_time)
-                    else:
-                        print(f'❌ 下載失敗，未知錯誤：{str(e)}')
-                        break
-
-            results_text.append(f'**[{i}] {title}**')
-            results_text.append(f'🔗線上觀看:{pdf_url}')
-            results_text.append(f'📂伺服器檔案路徑: `{filename}`\n')
-
-        print(f'\n[學術日誌]成功下載{max_results}篇關於{query}的論文！\n')
-        return '\n'.join(results_text) + '\n\n請將以上清單翻譯成繁體中文回覆給使用者，並告訴使用者：若想深入了解某篇論文，請告訴我檔案路徑或第幾篇，我之後可以幫忙閱讀並摘要。'
-    
-    except Exception as e:
-        print(e)
-        print()
-        return f'搜尋或下載論文失敗，錯誤訊息：{str(e)}'
-    
 @tool
 def paper_assistant_rag(filepath, user_goal):
     """
-    當使用者想要「摘要整篇論文」、「了解核心貢獻」或「詢問特定細節」時呼叫此工具。
+    當使用者想要「摘要整篇論文」或「詢問特定細節」時呼叫此工具。
     filepath: 伺服器上的檔案路徑。
-    user_goal: 使用者的意圖 (例如："這篇論文的摘要" 或 "實驗數據是多少？")。
+    user_goal: 使用者的意圖。
     """
     try:
         if not os.path.exists(filepath):
@@ -90,16 +69,13 @@ def paper_assistant_rag(filepath, user_goal):
         embeddings = HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')
         vectorstore = FAISS.from_documents(documents=splits, embedding=embeddings)
 
-        is_summary = any(word in user_goal for word in ["摘要", "重點", "總結", "summary"])
-        k_value = 6 if is_summary else 3
-
-        retriever = vectorstore.as_retriever(search_kwargs={'k': k_value})
-        relevant_docs = retriever.invoke(user_goal)
-
+        relevant_docs = vectorstore.as_retriever(search_kwargs={'k': 5}).invoke(user_goal)
         context = '\n\n---\n\n'.join([doc.page_content for doc in relevant_docs])
-        print(f"[RAG 系統]已針對目標「{user_goal}」檢索了{len(relevant_docs)}個段落。")
+        summary_llm = ChatOpenAI(model='gpt-3.5-turbo', base_url = os.getenv('BASE_URL'), temperature=0)
+        prompt = f'你是一個專業學術助手。請根據以下論文內容，用繁體中文回答：「{user_goal}」。\n\n內容：\n{context}'
+        final_answer = summary_llm.invoke(prompt)
 
-        return f"[DISPOSABLE]請根據以下檢索到的內容，用專業繁體中文回覆「{user_goal}」：\n\n{context}"
+        return f'[DISPOSABLE] 論文分析回答：\n{final_answer.content}'
     
     except Exception as e:
         return f'RAG系統執行失敗，錯誤訊息：{str(e)}'

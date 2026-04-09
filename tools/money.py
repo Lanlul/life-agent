@@ -28,7 +28,7 @@ def record_expense(item, amount, category):
     """
     將使用者的花費紀錄到資料庫中。必須包含項目(item)、金額(amount)與類別(category)。
     
-    🚨 【類別限制警告】：
+    【類別限制警告】：
     category 參數【嚴格】只能從以下 7 個選項中挑選一個填入：
     ['餐飲', '交通', '購物', '娛樂', '居住', '醫療', '其他']
     

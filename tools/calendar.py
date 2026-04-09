@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from langchain_core.messages import SystemMessage
 from langchain_core.tools import tool
 
 load_dotenv()
